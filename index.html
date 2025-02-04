@@ -2,11 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Snake + Split Background (Green + SkyBlue), FPS, Toggle Anim</title>
+  <title>Snake + Cylinder Body + Split BG + FPS + Toggle Anim</title>
   <style>
+    /* A pastel background color for the entire page */
     body {
       margin: 0;
+      background-color: #FFE5D8; /* a pastel orange/red */
     }
+
     canvas {
       border: 1px solid black;
       position: relative;
@@ -21,9 +24,20 @@
       font: 12px sans-serif;
       border-radius: 3px;
     }
+
+    /* Simple heading style for your title */
+    h2 {
+      margin: 8px;
+      text-align: center;
+      font-family: sans-serif;
+    }
   </style>
 </head>
 <body>
+
+  <!-- Title heading above the canvas -->
+  <h2>Rattlesnake with Cylinder Body</h2>
+
   <canvas id="webgl" width="600" height="600"></canvas>
   <div id="fpsMeter">FPS: --</div>
   
@@ -51,7 +65,6 @@
       uniform mat4 u_MvpMatrix;
       uniform mat4 u_GlobalRotation;
       void main() {
-        // Apply global rotation, then our MVP
         gl_Position = u_GlobalRotation * u_MvpMatrix * a_Position;
       }
     `;
@@ -60,7 +73,6 @@
       precision mediump float;
       uniform vec4 u_Color;
       void main() {
-        // Use the uniform color
         gl_FragColor = u_Color;
       }
     `;
@@ -74,14 +86,15 @@
     let u_GlobalRotation;
     let u_Color;
 
-    const NUM_VERTS = 36; // # of vertices in the unit cube
+    // Cylinder data
+    let g_cylBuffer = null;
+    let g_cylVerts  = 0; // total number of vertices for the cylinder
 
-    // Animation/time
+    // We'll keep the tail + head logic
     let g_time = 0;
     let g_delta = 0.03;
-    let g_animate = true;  // if false, no jiggling
+    let g_animate = true;
 
-    // Mouse/camera
     let g_rotX = 0; 
     let g_rotY = 0; 
     let isDragging = false;
@@ -89,7 +102,7 @@
 
     // Sliders
     let g_sliderAngle = 0;   // global rotation
-    let g_headSliderVal = 0; // 0..1 for the 2-joint head
+    let g_headSliderVal = 0; // 2-joint head
 
     // HEAD CONSTANTS
     const HEAD_ANGLE_MAX = 30;     
@@ -111,11 +124,8 @@
     const COLOR_YELLOW      = new Float32Array([0.7, 0.7, 0.0, 1.0]);
 
     // For our scissor-clears
-    const COLOR_GREEN   = [0.2, 0.8, 0.2, 1.0]; // ground
+    const COLOR_GREEN   = [0.2, 0.8, 0.2, 1.0];    // ground
     const COLOR_SKYBLUE = [0.53, 0.81, 0.98, 1.0]; // sky
-
-    // FPS
-    let g_lastTimestamp = performance.now();
 
     //================================================
     // 3. MAIN
@@ -129,18 +139,23 @@
       }
       gl.enable(gl.DEPTH_TEST);
 
+      // Create/Link Shaders
       const program = createProgram(gl, VSHADER_SOURCE, FSHADER_SOURCE);
       gl.useProgram(program);
 
+      // Look up locations
       a_Position       = gl.getAttribLocation(program, 'a_Position');
       u_MvpMatrix      = gl.getUniformLocation(program, 'u_MvpMatrix');
       u_GlobalRotation = gl.getUniformLocation(program, 'u_GlobalRotation');
       u_Color          = gl.getUniformLocation(program, 'u_Color');
 
-      initCubeBuffer();
+      // Build geometry
+      initCylinderBuffer(32); // cylinder
+      initCubeBuffer();       // cubes for tail + head
+
+      // Input handling
       initMouseHandlers(canvas);
 
-      // Sliders
       document.getElementById('globalRotateSlider').addEventListener('input', (ev) => {
         g_sliderAngle = parseFloat(ev.target.value);
       });
@@ -148,10 +163,9 @@
         g_headSliderVal = parseFloat(ev.target.value);
       });
 
-      // Button for toggling animation
       document.getElementById('toggleAnimBtn').addEventListener('click', () => {
         g_animate = !g_animate;
-        document.getElementById('toggleAnimBtn').textContent = 
+        document.getElementById('toggleAnimBtn').textContent =
           g_animate ? "Stop Animation" : "Start Animation";
       });
 
@@ -193,9 +207,57 @@
     }
 
     //================================================
-    // 5. INIT CUBE BUFFER
+    // 5A. INIT CYLINDER BUFFER
     //================================================
+    function initCylinderBuffer(slices) {
+      const verts = [];
+      const radius = 0.5;
+      const halfH = 0.5;
+
+      for (let i = 0; i < slices; i++) {
+        let theta     = (2*Math.PI * i)     / slices;
+        let nextTheta = (2*Math.PI * (i+1)) / slices;
+
+        let x1 = radius * Math.cos(theta);
+        let z1 = radius * Math.sin(theta);
+        let x2 = radius * Math.cos(nextTheta);
+        let z2 = radius * Math.sin(nextTheta);
+
+        // side triangles
+        verts.push(x1, -halfH, z1);
+        verts.push(x2, -halfH, z2);
+        verts.push(x2, +halfH, z2);
+
+        verts.push(x1, -halfH, z1);
+        verts.push(x2, +halfH, z2);
+        verts.push(x1, +halfH, z1);
+
+        // top cap
+        verts.push(0.0, +halfH, 0.0);
+        verts.push(x2, +halfH, z2);
+        verts.push(x1, +halfH, z1);
+
+        // bottom cap
+        verts.push(0.0, -halfH, 0.0);
+        verts.push(x1, -halfH, z1);
+        verts.push(x2, -halfH, z2);
+      }
+
+      const cylData = new Float32Array(verts);
+      g_cylVerts = cylData.length / 3;
+
+      g_cylBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, g_cylBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, cylData, gl.STATIC_DRAW);
+    }
+
+    //================================================
+    // 5B. INIT CUBE BUFFER
+    //================================================
+    let g_cubeBuffer = null;
+    let g_cubeVerts  = 36;
     function initCubeBuffer() {
+      // Standard 1x1x1 unit cube
       const vertices = new Float32Array([
         // Front
         -0.5, -0.5,  0.5,
@@ -246,12 +308,9 @@
         -0.5,  0.5, -0.5,
       ]);
 
-      const buffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      g_cubeBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, g_cubeBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
-      gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 0, 0);
-      gl.enableVertexAttribArray(a_Position);
     }
 
     //================================================
@@ -280,10 +339,24 @@
     //================================================
     // 7. DRAW HELPERS
     //================================================
-    function drawColoredCube(M, colorArray) {
-      gl.uniform4fv(u_Color, colorArray);
+    function drawColoredCylinder(M, color) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, g_cylBuffer);
+      gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(a_Position);
+
+      gl.uniform4fv(u_Color, color);
       gl.uniformMatrix4fv(u_MvpMatrix, false, M.elements);
-      gl.drawArrays(gl.TRIANGLES, 0, NUM_VERTS);
+      gl.drawArrays(gl.TRIANGLES, 0, g_cylVerts);
+    }
+
+    function drawColoredCube(M, color) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, g_cubeBuffer);
+      gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(a_Position);
+
+      gl.uniform4fv(u_Color, color);
+      gl.uniformMatrix4fv(u_MvpMatrix, false, M.elements);
+      gl.drawArrays(gl.TRIANGLES, 0, 36);
     }
 
     //================================================
@@ -293,10 +366,8 @@
     let g_fps = 0;
 
     function tick(now) {
-      // Compute FPS
       computeFPS(now);
 
-      // Update animation time if g_animate is true
       if (g_animate) {
         g_time += g_delta;
       }
@@ -319,28 +390,26 @@
       const w = canvas.width;
       const h = canvas.height;
 
-      //-------- SPLIT BACKGROUND using SCISSOR TEST --------
+      //---- SPLIT BACKGROUND ----
       gl.enable(gl.SCISSOR_TEST);
 
-      // 1) Bottom half = green
-      gl.scissor(0, 0, w, h/2); // x,y => bottom-left corner
+      // bottom half = green
+      gl.scissor(0, 0, w, h/2);
       gl.clearColor(...COLOR_GREEN);
-      // Only clear the COLOR buffer (not depth yet)
       gl.clear(gl.COLOR_BUFFER_BIT);
 
-      // 2) Top half = skyblue
+      // top half = skyblue
       gl.scissor(0, h/2, w, h/2);
       gl.clearColor(...COLOR_SKYBLUE);
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       gl.disable(gl.SCISSOR_TEST);
 
-      // Now clear the depth buffer once (so 3D objects can draw properly)
+      // clear depth
       gl.clearDepth(1.0);
       gl.clear(gl.DEPTH_BUFFER_BIT);
 
-      //------------- DRAW 3D OBJECTS -------------
-      // MVP
+      // Build MVP
       let baseMatrix = new Matrix4();
       const aspect = w / h;
       baseMatrix.setPerspective(60, aspect, 0.1, 100.0);
@@ -348,47 +417,52 @@
       baseMatrix.rotate(g_rotX, 1, 0, 0);
       baseMatrix.rotate(g_rotY, 0, 1, 0);
 
-      // Global rotation
+      // global rotation
       let globalRotMat = new Matrix4();
       globalRotMat.rotate(g_sliderAngle, 0, 1, 0);
       gl.uniformMatrix4fv(u_GlobalRotation, false, globalRotMat.elements);
 
-      // Jiggling offset
+      // jiggling
       const jiggle = 0.01 * Math.sin(g_time * 3.0);
 
-      //--- Body (brown)
+      //=== BODY: Cylinder, Horizontal & Lower
       {
         let bodyMat = new Matrix4(baseMatrix);
-        bodyMat.translate(-0.1, 0.0, 0.0);
-        bodyMat.scale(0.5, 0.05, 0.01);
-        drawColoredCube(bodyMat, COLOR_BROWN);
+
+        // DO NOT CHANGE THIS -- kept exactly as is
+        // no rotation => rotate(0,0,0,1) does nothing
+        // scale(0.5,0.05,0.05)
+        // translate(-0.24,0,0.0)
+
+        bodyMat.rotate(0, 0, 0, 1);
+        bodyMat.scale(0.5, 0.05, 0.05);
+        bodyMat.translate(-0.24, 0, 0.0);
+
+        drawColoredCylinder(bodyMat, COLOR_BROWN);
       }
 
-      //--- Rattle (yellow)
+      //=== RATTLE (using cubes)
       {
         let upOffset = jiggle;
         let downOffset = -jiggle;
 
-        // left
         let leftMat = new Matrix4(baseMatrix);
         leftMat.translate(-0.6, upOffset, 0.0);
         leftMat.scale(0.1, 0.04, 0.01);
         drawColoredCube(leftMat, COLOR_YELLOW);
 
-        // middle
         let midMat = new Matrix4(baseMatrix);
         midMat.translate(-0.5, downOffset, 0.0);
         midMat.scale(0.1, 0.06, 0.01);
         drawColoredCube(midMat, COLOR_YELLOW);
 
-        // right
         let rightMat = new Matrix4(baseMatrix);
         rightMat.translate(-0.4, upOffset, 0.0);
         rightMat.scale(0.1, 0.08, 0.01);
         drawColoredCube(rightMat, COLOR_YELLOW);
       }
 
-      //--- 2-Joint Head (head-brown)
+      //=== 2-Joint Head (still cubes)
       {
         let seg1Mat = new Matrix4(baseMatrix);
         seg1Mat.translate(0.2, 0.0, 0);
@@ -401,7 +475,6 @@
         seg1Mat.scale(SEG1_WIDTH, SEG1_HEIGHT, 0.01);
         drawColoredCube(seg1Mat, COLOR_HEAD_BROWN);
 
-        // second segment
         let seg2Mat = new Matrix4(seg1Mat);
         seg2Mat.translate(SEG1_WIDTH, 0, 0);
         let dx = SEG2_OFFSET_X * g_headSliderVal;
