@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Snake + Split Background (Green + SkyBlue), FPS, Toggle Anim</title>
+  <style>
+    body {
+      margin: 0;
+    }
+    canvas {
+      border: 1px solid black;
+      position: relative;
+    }
+    #fpsMeter {
+      position: absolute;
+      top: 5px;
+      left: 5px;
+      color: black;
+      background-color: rgba(255,255,255,0.7);
+      padding: 2px 5px;
+      font: 12px sans-serif;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="webgl" width="600" height="600"></canvas>
+  <div id="fpsMeter">FPS: --</div>
+  
+  <br/>
+  <!-- Global rotation slider -->
+  <label for="globalRotateSlider">Global Rotation:</label>
+  <input type="range" id="globalRotateSlider" min="0" max="360" value="0" />
+
+  <br/>
+  <!-- Head movement slider -->
+  <label for="headSlider">Head Movement:</label>
+  <input type="range" id="headSlider" min="0" max="1" step="0.01" value="0" />
+
+  <!-- Button to toggle jiggling animation -->
+  <button id="toggleAnimBtn">Stop Animation</button>
+
+  <script type="module">
+    import { Matrix4 } from './cuon-matrix.js'; // Extended matrix class
+
+    //================================================
+    // 1. SHADERS
+    //================================================
+    const VSHADER_SOURCE = `
+      attribute vec4 a_Position;
+      uniform mat4 u_MvpMatrix;
+      uniform mat4 u_GlobalRotation;
+      void main() {
+        // Apply global rotation, then our MVP
+        gl_Position = u_GlobalRotation * u_MvpMatrix * a_Position;
+      }
+    `;
+
+    const FSHADER_SOURCE = `
+      precision mediump float;
+      uniform vec4 u_Color;
+      void main() {
+        // Use the uniform color
+        gl_FragColor = u_Color;
+      }
+    `;
+
+    //================================================
+    // 2. GLOBALS
+    //================================================
+    let gl;
+    let a_Position;
+    let u_MvpMatrix;
+    let u_GlobalRotation;
+    let u_Color;
+
+    const NUM_VERTS = 36; // # of vertices in the unit cube
+
+    // Animation/time
+    let g_time = 0;
+    let g_delta = 0.03;
+    let g_animate = true;  // if false, no jiggling
+
+    // Mouse/camera
+    let g_rotX = 0; 
+    let g_rotY = 0; 
+    let isDragging = false;
+    let lastX = 0, lastY = 0;
+
+    // Sliders
+    let g_sliderAngle = 0;   // global rotation
+    let g_headSliderVal = 0; // 0..1 for the 2-joint head
+
+    // HEAD CONSTANTS
+    const HEAD_ANGLE_MAX = 30;     
+    const SEG2_OFFSET_X  = 0.15;  
+    const SEG2_OFFSET_Y  = 0.16;  
+
+    const SEG1_WIDTH  = 0.3;  
+    const SEG1_HEIGHT = 0.04;
+
+    const SEG2_WIDTH  = 0.15; 
+    const SEG2_HEIGHT = 0.04;
+
+    const SEG1_BASE_X = 0.2; 
+    const SEG1_BASE_Y = 0.0;
+
+    // Colors
+    const COLOR_BROWN       = new Float32Array([0.55, 0.27, 0.07, 1.0]); 
+    const COLOR_HEAD_BROWN  = new Float32Array([0.65, 0.46, 0.33, 1.0]); 
+    const COLOR_YELLOW      = new Float32Array([0.7, 0.7, 0.0, 1.0]);
+
+    // For our scissor-clears
+    const COLOR_GREEN   = [0.2, 0.8, 0.2, 1.0]; // ground
+    const COLOR_SKYBLUE = [0.53, 0.81, 0.98, 1.0]; // sky
+
+    // FPS
+    let g_lastTimestamp = performance.now();
+
+    //================================================
+    // 3. MAIN
+    //================================================
+    function main() {
+      const canvas = document.getElementById('webgl');
+      gl = canvas.getContext('webgl');
+      if (!gl) {
+        console.error('Failed to get WebGL context');
+        return;
+      }
+      gl.enable(gl.DEPTH_TEST);
+
+      const program = createProgram(gl, VSHADER_SOURCE, FSHADER_SOURCE);
+      gl.useProgram(program);
+
+      a_Position       = gl.getAttribLocation(program, 'a_Position');
+      u_MvpMatrix      = gl.getUniformLocation(program, 'u_MvpMatrix');
+      u_GlobalRotation = gl.getUniformLocation(program, 'u_GlobalRotation');
+      u_Color          = gl.getUniformLocation(program, 'u_Color');
+
+      initCubeBuffer();
+      initMouseHandlers(canvas);
+
+      // Sliders
+      document.getElementById('globalRotateSlider').addEventListener('input', (ev) => {
+        g_sliderAngle = parseFloat(ev.target.value);
+      });
+      document.getElementById('headSlider').addEventListener('input', (ev) => {
+        g_headSliderVal = parseFloat(ev.target.value);
+      });
+
+      // Button for toggling animation
+      document.getElementById('toggleAnimBtn').addEventListener('click', () => {
+        g_animate = !g_animate;
+        document.getElementById('toggleAnimBtn').textContent = 
+          g_animate ? "Stop Animation" : "Start Animation";
+      });
+
+      requestAnimationFrame(tick);
+    }
+
+    //================================================
+    // 4. CREATE PROGRAM
+    //================================================
+    function createProgram(gl, vSrc, fSrc) {
+      const vShader = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vShader, vSrc);
+      gl.compileShader(vShader);
+      if (!gl.getShaderParameter(vShader, gl.COMPILE_STATUS)) {
+        console.error('Vertex shader error:', gl.getShaderInfoLog(vShader));
+        gl.deleteShader(vShader);
+        return null;
+      }
+
+      const fShader = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fShader, fSrc);
+      gl.compileShader(fShader);
+      if (!gl.getShaderParameter(fShader, gl.COMPILE_STATUS)) {
+        console.error('Fragment shader error:', gl.getShaderInfoLog(fShader));
+        gl.deleteShader(fShader);
+        return null;
+      }
+
+      const program = gl.createProgram();
+      gl.attachShader(program, vShader);
+      gl.attachShader(program, fShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error('Program link error:', gl.getProgramInfoLog(program));
+        gl.deleteProgram(program);
+        return null;
+      }
+      return program;
+    }
+
+    //================================================
+    // 5. INIT CUBE BUFFER
+    //================================================
+    function initCubeBuffer() {
+      const vertices = new Float32Array([
+        // Front
+        -0.5, -0.5,  0.5,
+         0.5, -0.5,  0.5,
+         0.5,  0.5,  0.5,
+        -0.5, -0.5,  0.5,
+         0.5,  0.5,  0.5,
+        -0.5,  0.5,  0.5,
+
+        // Back
+        -0.5, -0.5, -0.5,
+         0.5,  0.5, -0.5,
+         0.5, -0.5, -0.5,
+        -0.5, -0.5, -0.5,
+        -0.5,  0.5, -0.5,
+         0.5,  0.5, -0.5,
+
+        // Top
+        -0.5,  0.5, -0.5,
+        -0.5,  0.5,  0.5,
+         0.5,  0.5,  0.5,
+        -0.5,  0.5, -0.5,
+         0.5,  0.5,  0.5,
+         0.5,  0.5, -0.5,
+
+        // Bottom
+        -0.5, -0.5, -0.5,
+         0.5, -0.5,  0.5,
+        -0.5, -0.5,  0.5,
+        -0.5, -0.5, -0.5,
+         0.5, -0.5, -0.5,
+         0.5, -0.5,  0.5,
+
+        // Right
+         0.5, -0.5, -0.5,
+         0.5,  0.5,  0.5,
+         0.5, -0.5,  0.5,
+         0.5, -0.5, -0.5,
+         0.5,  0.5, -0.5,
+         0.5,  0.5,  0.5,
+
+        // Left
+        -0.5, -0.5, -0.5,
+        -0.5, -0.5,  0.5,
+        -0.5,  0.5,  0.5,
+        -0.5, -0.5, -0.5,
+        -0.5,  0.5,  0.5,
+        -0.5,  0.5, -0.5,
+      ]);
+
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+      gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(a_Position);
+    }
+
+    //================================================
+    // 6. MOUSE HANDLERS
+    //================================================
+    function initMouseHandlers(canvas) {
+      canvas.onmousedown = (ev) => {
+        isDragging = true;
+        lastX = ev.clientX;
+        lastY = ev.clientY;
+      };
+      canvas.onmousemove = (ev) => {
+        if (isDragging) {
+          const dx = ev.clientX - lastX;
+          const dy = ev.clientY - lastY;
+          g_rotY += dx * 0.5;
+          g_rotX += dy * 0.5;
+          lastX = ev.clientX;
+          lastY = ev.clientY;
+        }
+      };
+      canvas.onmouseup = () => { isDragging = false; };
+      canvas.onmouseleave = () => { isDragging = false; };
+    }
+
+    //================================================
+    // 7. DRAW HELPERS
+    //================================================
+    function drawColoredCube(M, colorArray) {
+      gl.uniform4fv(u_Color, colorArray);
+      gl.uniformMatrix4fv(u_MvpMatrix, false, M.elements);
+      gl.drawArrays(gl.TRIANGLES, 0, NUM_VERTS);
+    }
+
+    //================================================
+    // 8. RENDER LOOP with FPS + 2-Pass CLEAR
+    //================================================
+    let g_lastFrameTime = performance.now();
+    let g_fps = 0;
+
+    function tick(now) {
+      // Compute FPS
+      computeFPS(now);
+
+      // Update animation time if g_animate is true
+      if (g_animate) {
+        g_time += g_delta;
+      }
+
+      renderScene();
+      requestAnimationFrame(tick);
+    }
+
+    function computeFPS(now) {
+      let dt = now - g_lastFrameTime;
+      g_lastFrameTime = now;
+      if (dt <= 0) return;
+      const fpsNow = 1000 / dt;
+      g_fps = 0.9*g_fps + 0.1*fpsNow; 
+      document.getElementById('fpsMeter').textContent = `FPS: ${g_fps.toFixed(1)}`;
+    }
+
+    function renderScene() {
+      const canvas = gl.canvas;
+      const w = canvas.width;
+      const h = canvas.height;
+
+      //-------- SPLIT BACKGROUND using SCISSOR TEST --------
+      gl.enable(gl.SCISSOR_TEST);
+
+      // 1) Bottom half = green
+      gl.scissor(0, 0, w, h/2); // x,y => bottom-left corner
+      gl.clearColor(...COLOR_GREEN);
+      // Only clear the COLOR buffer (not depth yet)
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // 2) Top half = skyblue
+      gl.scissor(0, h/2, w, h/2);
+      gl.clearColor(...COLOR_SKYBLUE);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.disable(gl.SCISSOR_TEST);
+
+      // Now clear the depth buffer once (so 3D objects can draw properly)
+      gl.clearDepth(1.0);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+
+      //------------- DRAW 3D OBJECTS -------------
+      // MVP
+      let baseMatrix = new Matrix4();
+      const aspect = w / h;
+      baseMatrix.setPerspective(60, aspect, 0.1, 100.0);
+      baseMatrix.lookAt(0, 0, 4,  0, 0, 0,  0, 1, 0);
+      baseMatrix.rotate(g_rotX, 1, 0, 0);
+      baseMatrix.rotate(g_rotY, 0, 1, 0);
+
+      // Global rotation
+      let globalRotMat = new Matrix4();
+      globalRotMat.rotate(g_sliderAngle, 0, 1, 0);
+      gl.uniformMatrix4fv(u_GlobalRotation, false, globalRotMat.elements);
+
+      // Jiggling offset
+      const jiggle = 0.01 * Math.sin(g_time * 3.0);
+
+      //--- Body (brown)
+      {
+        let bodyMat = new Matrix4(baseMatrix);
+        bodyMat.translate(-0.1, 0.0, 0.0);
+        bodyMat.scale(0.5, 0.05, 0.01);
+        drawColoredCube(bodyMat, COLOR_BROWN);
+      }
+
+      //--- Rattle (yellow)
+      {
+        let upOffset = jiggle;
+        let downOffset = -jiggle;
+
+        // left
+        let leftMat = new Matrix4(baseMatrix);
+        leftMat.translate(-0.6, upOffset, 0.0);
+        leftMat.scale(0.1, 0.04, 0.01);
+        drawColoredCube(leftMat, COLOR_YELLOW);
+
+        // middle
+        let midMat = new Matrix4(baseMatrix);
+        midMat.translate(-0.5, downOffset, 0.0);
+        midMat.scale(0.1, 0.06, 0.01);
+        drawColoredCube(midMat, COLOR_YELLOW);
+
+        // right
+        let rightMat = new Matrix4(baseMatrix);
+        rightMat.translate(-0.4, upOffset, 0.0);
+        rightMat.scale(0.1, 0.08, 0.01);
+        drawColoredCube(rightMat, COLOR_YELLOW);
+      }
+
+      //--- 2-Joint Head (head-brown)
+      {
+        let seg1Mat = new Matrix4(baseMatrix);
+        seg1Mat.translate(0.2, 0.0, 0);
+        let halfWidth1 = 0.5 * SEG1_WIDTH;
+        seg1Mat.translate(-halfWidth1, 0, 0);
+
+        let seg1Angle = HEAD_ANGLE_MAX * g_headSliderVal;  
+        seg1Mat.rotate(seg1Angle, 0, 0, 1);
+        seg1Mat.translate(+halfWidth1 + 0.07, -0.005, 0);
+        seg1Mat.scale(SEG1_WIDTH, SEG1_HEIGHT, 0.01);
+        drawColoredCube(seg1Mat, COLOR_HEAD_BROWN);
+
+        // second segment
+        let seg2Mat = new Matrix4(seg1Mat);
+        seg2Mat.translate(SEG1_WIDTH, 0, 0);
+        let dx = SEG2_OFFSET_X * g_headSliderVal;
+        let dy = SEG2_OFFSET_Y * g_headSliderVal;
+        seg2Mat.translate(dx, dy, 0);
+        seg2Mat.scale(SEG2_WIDTH, SEG2_HEIGHT, 0.01);
+        drawColoredCube(seg2Mat, COLOR_HEAD_BROWN);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
